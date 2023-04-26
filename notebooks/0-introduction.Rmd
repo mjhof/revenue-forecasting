@@ -1,0 +1,299 @@
+---
+title: "Applying the CRISP-DM Data Science Methodology to Sales Volume Forecasting and Budgeting Problems"
+subtitle: "Introduction"
+author: "Matthias Hofmaier (11944050)"
+#- name: Author One   
+output: pdf_document
+date: "May 2023"
+---
+
+# Introduction
+Reliable forecasts of a company’s sales volume can be of massive advantage in budgeting and strategic planning. Traditional methods to forecast sales often rely on univariate moving average models. In the last decade, machine learning methods, which can incorporate information over various dimensions gained a lot of popularity. Those models allow the inclusion of variables from annual financial statements, including balance sheets and profit and loss statements, that potentially increase the prediction performance. But dealing with this data can be challenging. Especially for people who are from different domains and are not used to data science workflows. The Cross Industry Standard Process for Data Mining (CRISP-DM) can help to perform data science projects of this kind in a well-defined way. Therefore the goal of this project is to create a guideline project for students in economics that showcases how the CRISP-DM methodology can be applied to sales volume forecasting and budgeting problems. The project will be carried out on the example of comparing a univariate model and a multivariate machine learning model within the context of U.S. stock corporations in the S&P 500 from 2002 to 2022.
+
+![CRISP-DM Model](../images/crisp-dm.jpg){width="70%"}
+
+The CRISP-DM model consists of six stages that can be followed to successfully solve a data science problem. In the first stage, Business Understanding, the needs of a business are identified and project goals and KPIs are defined. As this project is done within a university course, the goals and KPIs were already defined within a proposal and therefore this stage will be skipped. The dataset that will be used within this project stems from the Thomson Reuters Datastream database and includes the quarterly sales and variables from annual financial statements for S&P 500 stock corporations from 2002 to 2022. The financial statements consist of balance sheets with attributes describing the assets, liabilities, and equity as well as profit and loss statements which contain attributes describing the sales and expenses of a particular company. Datastream comes with an Excel interface but is not made to retrieve data in a clean way for multiple companies at once. Thus, an initial data transformation has to be performed to convert the data spreading over several Excel sheets to a few tables before being able to execute the Data Understanding stage of this project. This will be done within this notebook.
+
+## Imports
+```{r}
+library(readxl)
+library(tidyverse)
+library(stringr)
+```
+
+## Constants
+```{r}
+RAW_DATA_PATH <- "../data/raw/datenabzug_sp500.xlsx"
+OUTPUT_BASE_PATH <- "../data/processed"
+SALES_OUTPUT_PATH <- paste(OUTPUT_BASE_PATH, "sales.csv", sep = "/")
+BALANCE_SHEET_OUTPUT_PATH <- paste(OUTPUT_BASE_PATH, "balance_sheet.csv", sep = "/")
+PROFIT_LOSS_OUTPUT_PATH <- paste(OUTPUT_BASE_PATH, "profit_loss.csv", sep = "/")
+```
+
+# Sales
+## Load and transform quartely sales data
+```{r, echo=FALSE}
+load_transform_sales_quarter <- function(quarter) {
+  # read and transpose
+  df <-
+    suppressMessages(read_excel(RAW_DATA_PATH, sheet = paste0("Sales Q", quarter)))
+  df <- t(df) %>%
+    as.data.frame()  %>%
+    rownames_to_column("Name")
+  
+  colnames(df) <- df[1,]
+  df <- slice(df, -1)
+  
+  # extract company name and variable
+  df <- df %>%
+    mutate(
+      company = str_trim(str_extract(Name, "^.+?(?=\\s-\\s)")),
+      # use everything up until " - " as company name
+      variable = str_trim(str_extract(Name, "(?<= - ).*(?= -)")) 
+      # use everything between "-" and "-" as variable name
+    ) %>% filter(company != "NA")
+  
+  # pivot dataframe
+  df <- df %>% select(-Name) %>%
+    pivot_longer(
+      cols = -c(company, variable),
+      names_to = "Name",
+      values_to = "interim_sales"
+    )
+  
+  # extract year and quarter from Name column
+  df <- df %>% mutate(year = as.integer(str_extract(Name, "\\s.*")),
+                      quarter = as.integer(substr(Name, 2, 3))) %>% select(-Name)
+  
+  # remove rows with missing quarter values
+  df <- df %>% filter(interim_sales != "NA")
+  
+  df$interim_sales <- as.integer(df$interim_sales)
+  
+  # remove variable column
+  df <- df %>% select(-variable)
+  
+  return(df)
+}
+```
+
+```{r}
+# apply function to all 4 quarters
+df_sales <- map_dfr(1:4, load_transform_sales_quarter)
+cat(
+  paste(
+    "Transformed interim sales data frame contains ",
+    nrow(df_sales),
+    " records for ",
+    n_distinct(df_sales$company),
+    " companies\nfrom year ",
+    min(df_sales$year),
+    " to ",
+    max(df_sales$year),
+    ".",
+    sep = ""
+  )
+)
+head(df_sales)
+```
+
+
+## Save to CSV
+```{r}
+write.csv(df_sales, SALES_OUTPUT_PATH)
+```
+
+
+# Balance sheet
+## Function to add spaces to some company names
+```{r}
+# add space to names of companies without space before the "-"
+# without this, we will later have difficulties in correctly parsing the variable names
+company_names_without_space <- c(
+  "THERMO FISHER SCIENTIFIC",
+  "ADOBE (NAS)",
+  "CONSTELLATION BRANDS 'A'",
+  "WALGREENS BOOTS ALLIANCE",
+  "LYONDELLBASELL INDS.CL.A",
+  "CITIZENS FINANCIAL GROUP",
+  "MID-AMER.APT COMMUNITIES",
+  "TERADYNE (XSC)",
+  "UNITED AIRLINES HOLDINGS",
+  "ALLIANT ENERGY (XSC)",
+  "CBOE GLOBAL MARKETS(BTS)",
+  "BIO-RAD LABORATORIES 'A'",
+  "UNIVERSAL HEALTH SVS.'B'",
+  "NEWELL BRANDS (XSC)"
+)
+
+company_names_without_space <-
+  company_names_without_space[!duplicated(company_names_without_space)]
+
+add_space_to_company_names <-
+  function(name, c_names = company_names_without_space) {
+    for (c_name in c_names) {
+      if (str_detect(name, fixed(c_name))) {
+        name = str_replace_all(name, fixed(c_name), paste0(c_name,  " "))
+      }
+    }
+    return(name)
+  }
+```
+
+## Load and transform balance sheet data
+```{r, echo=FALSE}
+load_transform_balance_sheet <- function() {
+  # read and transpose
+  df <- suppressMessages(read_excel(RAW_DATA_PATH, sheet = "Balance Sheet"))
+  df <- t(df) %>%
+    as.data.frame()  %>%
+    rownames_to_column("Name")
+  
+  colnames(df) <- df[1, ] # set correct header
+  df <- slice(df, -1) # and remove from rows
+  
+  # remove entries starting with #ERROR
+  df <- df[!startsWith(df$Name, "#ERROR"), ]
+  
+  # add space to company names
+  df <-
+    df %>% rowwise() %>% mutate(Name = add_space_to_company_names(Name))
+  
+  # parse company and variable
+  df <- df %>%
+    mutate(company = str_trim(str_extract(Name, "^.+?(?=\\s-\\s)")),
+           variable_name = str_trim(str_extract(Name, "([^-]+$)")))
+  
+  # pivot data frame to company, variable_name, year, value format
+  # and cast to numeric values to integer
+  df <-
+    df %>% select(-1) %>% pivot_longer(
+      cols = -c(company, variable_name),
+      names_to = "year",
+      values_to = "value"
+    ) %>% mutate(year = as.integer(year), value = as.integer(value))
+  
+  # pivot data frame to wide format
+  df <-
+    df %>% pivot_wider(id_cols = c(company, year), names_from = variable_name)
+  
+  return(df)
+}
+  
+```
+
+```{r}
+df_balance_sheet <- load_transform_balance_sheet() 
+
+cat(
+  paste(
+    "Transformed balance sheet data frame contains",
+    nrow(df_balance_sheet),
+    " records",
+    "with",
+    ncol(df_balance_sheet),
+    "variables\nfor",
+    n_distinct(df_balance_sheet$company),
+    " companies from year",
+    min(df_balance_sheet$year),
+    " to",
+    max(df_balance_sheet$year),
+    "."
+  )
+)
+
+head(df_balance_sheet)
+```
+
+## Save to CSV
+```{r}
+write.csv(df_balance_sheet, BALANCE_SHEET_OUTPUT_PATH)
+```
+
+# Profit & Loss
+## Load and transform profit & loss data
+```{r, echo=FALSE}
+load_transform_profit_loss <- function() {
+  for (i in 1:2) {
+    df_tmp <-
+      suppressMessages(read_excel(RAW_DATA_PATH, sheet = paste("Profit & Loss", i)))
+    
+    df_tmp <- t(df_tmp) %>%
+      as.data.frame()  %>%
+      rownames_to_column("Name")
+    
+    colnames(df_tmp) <- df_tmp[1, ] # set correct header
+    df_tmp <- slice(df_tmp, -1) # and remove from rows
+    
+    if (i == 1) {
+      df <- df_tmp
+      first_iter <- FALSE
+    } else {
+      df <- rbind(df, df_tmp)
+    }
+  }
+  
+  # remove entries starting with #ERROR
+  df <- df[!startsWith(df$Name, "#ERROR"),]
+  
+  # add space to company names
+  df <-
+    df %>% rowwise() %>% mutate(Name = add_space_to_company_names(Name))
+  
+  # parse company and variable
+  df <- df %>%
+    mutate(company = str_trim(str_extract(Name, "^.+?(?=\\s-\\s)")),
+           #variable_name = str_trim(str_extract(Name, "([^-]+$)"))
+           variable_name = str_trim(str_extract(Name, "\\s-\\s(?!.*\\s-\\s)(.*)")))
+  
+  # Remove trailing '- ' from colnames
+  colnames(df) <-
+    sapply(
+      colnames(df),
+      FUN = function(colname)
+        str_replace(colname, "- ", "")
+    )
+  
+  # pivot data frame to company, variable_name, year, value format
+  # and cast to numeric values to integer
+  df <-
+    df %>% select(-1) %>% pivot_longer(
+      cols = -c(company, variable_name),
+      names_to = "year",
+      values_to = "value"
+    ) %>% mutate(year = as.integer(year), value = as.integer(value))
+  
+  # pivot data frame to wide format
+  df <-
+    df %>% pivot_wider(id_cols = c(company, year), names_from = variable_name)
+  
+  return(df)
+}
+```
+
+```{r}
+df_profit_loss <- load_transform_profit_loss() 
+
+cat(
+  paste(
+    "Transformed profit loss data frame contains",
+    nrow(df_profit_loss),
+    " records",
+    "with",
+    ncol(df_profit_loss),
+    "variables\nfor",
+    n_distinct(df_profit_loss$company),
+    " companies from year",
+    min(df_profit_loss$year),
+    " to",
+    max(df_profit_loss$year),
+    "."
+  )
+)
+
+head(df_profit_loss)
+```
+## Save to CSV
+```{r}
+write.csv(df_profit_loss, PROFIT_LOSS_OUTPUT_PATH)
+```
