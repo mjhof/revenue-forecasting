@@ -1,0 +1,407 @@
+---
+title: "Applying the CRISP-DM Data Science Methodology to Sales Volume Forecasting and Budgeting Problems"
+subtitle: "Data Understanding"
+author: "Matthias Hofmaier (11944050)"
+output: pdf_document
+date: "May 2023"
+---
+
+The Data Understanding stage is the first CRISP-DM stage we will perform within this project. The first goal of this stage is to examine the available data regarding properties like format, number of records or number of variables. The second goal is to gain a deeper understanding of the data by e.g., visualizing distributions and changes over time or performing correlation analysis. The final goal of this stage is to assess the data quality and to define tasks for the data preparation stage by using the insights that were gained by exploring the data. The data analysis will be performed separately for the quarterly sales, the balance sheet and the profit and loss data frames.  
+
+## Imports
+```{r}
+library(tidyverse)
+library(modeest)
+library(zoo)
+library(ggplot2)
+library(corrplot)
+
+# install lares correlation package from github
+#devtools::install_github("laresbernardo/lares")
+library(lares)
+```
+
+## Constants
+```{r}
+BASE_PATH <- "../data/processed"
+SALES_PATH <- paste(BASE_PATH, "sales.csv", sep = "/")
+BALANCE_SHEET_PATH <- paste(BASE_PATH, "balance_sheet.csv", sep = "/")
+PROFIT_LOSS_PATH <- paste(BASE_PATH, "profit_loss.csv", sep = "/")
+```
+
+# 1. Sales
+## 1.1 Load data
+```{r}
+df_sales <- read_csv(SALES_PATH, show_col_types = FALSE)
+df_sales <- df_sales[, -1] # remove index column
+head(df_sales)
+```
+
+## 1.2 Show data description
+First of all, we will show a general description of the data frame including the variable types, number of distinct values, minimums, maximums, number of records and variables. 
+```{r, echo=FALSE}
+show_data_description <- function(df) {
+  types <- sapply(df, class) # data types
+  ndvs <- sapply(df, n_distinct)  # number of distinct values
+  mins <- sapply(df, min, na.rm=TRUE) # minimums
+  maxs <- sapply(df, max, na.rm=TRUE) # maximums
+  
+  df_description <-
+    data.frame(
+      type = types,
+      n_distinct = ndvs,
+      min = mins,
+      max = maxs
+    )
+  
+  cat(paste(
+    "The data frame contains",
+    nrow(df), "rows", 
+    "with", ncol(df), "variables",
+    "for", n_distinct(df$company), " distinct companies",
+    "from", min(df$year), "to", max(df$year), "."
+  ))
+  
+  df_description
+}
+
+show_data_description(df_sales)
+```
+
+The output above shows that we have 34841 records with 4 variables for 500 distinct companies from 2002 to 2022. This equals a time range of 21 years. The company names are of type character. The interim_sales, year and quarter variables are of numeric type. 
+
+## 1.3 Distributions
+The second step will be to visualize distributions of the numeric variables of the data frame. This can help to get a deeper understanding of the variables and lead to tasks that have to be done in the data preparation stage.
+```{r}
+show_data_distribution <- function(df) {
+  # get numeric columns of data frame
+  num_cols <- sapply(df, is.numeric)
+  
+  # set 2x2 plot grid
+  plot_grid <- c(2, 2)
+  if (sum(num_cols) > 4) {
+    # use 3x3 grid, if there are > 4 numeric variables
+    plot_grid <- c(3, 3)
+  }
+  par(mfrow = plot_grid)
+  
+  # show histogram of numeric columns
+  for (i in which(num_cols)) {
+    tmp_variable <- as.numeric(unlist(df[, i]))
+    hist(tmp_variable,
+         main = names(df)[i],
+         xlab = names(df)[i])
+  }
+}
+
+show_data_distribution(df_sales)
+```
+In the plots above, we can see a uniform distribution for the year and quarter variable. For the interim_sales variable, we can observe a right skewed distribution. This suggests, that we log transform this variable in the data preparation step, as this makes the distribution more symmetrical.
+
+## 1.4 Change over time
+Now we will visualize changes over time. As we have distinct sales time series' for each company, this visualization is only valuable if we draw a line for each distinct company separately. As 500 companies in one plot would only lead to visual clutter, we will only show a selection of 8 companies together with the average over all companies.  
+```{r}
+# create date from year and quarter
+df_sales$date <-
+  as.Date(as.yearqtr(paste0(df_sales$year, "-", df_sales$quarter), format = "%Y-%q"))
+
+# calculate average over all companies
+average_interim_sales <-
+  df_sales %>% group_by(date) %>% summarise(interim_sales = mean(interim_sales))
+average_interim_sales$company <- "AVERAGE INTERIM SALES"
+
+# define selection of companies as we cannot visualize all companies
+selected_companies <-
+  c(
+    "APPLE INC",
+    "MICROSOFT CORP",
+    "AMAZON.COM INC",
+    "TESLA INC",
+    "ALPHABET INC",
+    "UNITEDHEALTH GROUP",
+    "EXXON MOBIL CORP",
+    "JOHNSON & JOHNSON"
+  )
+df_sales_selected <-
+  df_sales[df_sales$company %in% selected_companies,
+           c("date", "interim_sales", "company")]
+
+# bind selected companies with average over all companies
+df_sales_selected <- rbind(df_sales_selected, average_interim_sales)
+
+
+# show line plot
+ggplot(df_sales_selected, aes(x = date, y = interim_sales)) +
+  geom_line(aes(color = company)) 
+```
+
+The visualization of the selected companies looks reasonable. We can see that from 2010 on, all of the selected time series' have a higher interim sales value than the average. For TESLA INC we can observe a time series which is very short. As we cannot visualize all companies, we will try to find short companies in a programmatic (and not visual) way in the next analysis step. 
+
+
+## 1.5 Investigate number of observations and continuity per company
+The dataset ranges from 2002 to 2022, which equals 21 distinct years. As we have 4 quarters in each year, each company should (in the best case) carry $21*4=84$ observations. Later on, we want to use 5 years for the evaluation of our prediction models. This equals $4*5=20$ observations. To train and calibrate the models, we need some training data. This dataset should carry at least as many observations as the evaluation set, therefore the minimum number of observations for a company is 40. 
+```{r}
+# calculate observations per company
+obs_per_company <-
+  df_sales %>% group_by(df_sales$company) %>% summarise(n_observations = n()) %>% arrange(n_observations)
+
+# rename column 
+colnames(obs_per_company)[1] <- "company"
+obs_per_company
+
+n_best <- 84 # 21 years * 4 quarters = 84 observations per company
+n_min <- 40 # at least 5 years for training and 5 years for evaluation * 4 = 40 
+
+# show histogram of number of observations
+hist(obs_per_company$n_observations)
+abline(v = 84, lty = 2, col = 1)
+abline(v = 42, lty = 2, col = 2)
+legend(
+  "topright",
+  legend = c(paste("best case: n =", n_best), paste("min case: n =", n_min)),
+  lty = 2,
+  col = c(1, 2)
+)
+
+
+
+cat("Found", paste(nrow(obs_per_company[obs_per_company$n_observations < n_min, ])), 
+    "companies with less than", paste(n_min), "observations.")
+```
+We can see, that there are 36 companies with less than 40 observations. We have to exclude them in the data preparation stage. We can also see, that there are companies with more than 84 observations. This is strange and has to be investigated in the next step by plotting those companies.
+
+```{r}
+# show companies with n_observations > 84
+obs_per_company[obs_per_company$n_observations > n_best,]
+
+# plot
+companies_too_many_obs <- obs_per_company[obs_per_company$n_observations > n_best,]$company
+
+# show line plot
+ggplot(df_sales[df_sales$company %in% companies_too_many_obs, ], aes(x = date, y = interim_sales)) +
+  geom_line(aes(color = company)) 
+
+```
+
+The displayed time series' look reasonable. A possible reason for the high number of observations for those two companies could be duplicates in the data. We will investigate this below.
+
+```{r}
+for (company in companies_too_many_obs){
+  cat("Found", 
+      paste(sum(duplicated(df_sales[df_sales$company == company, ]))),
+      "duplicated records for company",
+      paste(company),
+      "\n"
+      )
+}
+```
+
+We can indeed see that the number of observations is too high for those companies because of duplicated records. We will have to remove them in the data preparation step.
+
+Let's now investigate if the dates are continuous, i.e., if there are missing values in between the time series of quarterly sales. For that, we order the time series by date for each company separately and calculate the time difference between each consecutive observation. If it is not equal to 3 months, the time series is not continuous and has to be interpolated later on.
+
+```{r}
+# create new column that marks if ts is continuous,
+# set to true for all companies in the beginning
+obs_per_company$is_continous <- TRUE
+
+for (company in unique(df_sales$company)) {
+  # for each company
+  company_dates <- df_sales[df_sales$company == company,]$date
+  company_dates <- sort(company_dates) # select sorted dates
+  for (i in 1:(length(company_dates) - 1)) {
+    # for each date index
+    difference_in_days <-
+      as.integer(company_dates[i + 1] - company_dates[i])
+    # in case there are two months with 31 days in the quarter,
+    # the maximum valid difference in days is 92
+    if (difference_in_days > 92) {
+      obs_per_company[obs_per_company$company == company, "is_continous"] <-
+        FALSE
+      break
+    }
+  }
+}
+
+cat("Found",
+    paste(nrow(obs_per_company[obs_per_company$is_continous == FALSE, ])),
+    "companies that do not have a continous sales time series.")
+```
+
+Those 69 companies that do not have a continuous time series have to be interpolated in the data preparation stage.
+
+## 1.6 Data quality assesment
+Now we will assess the data quality by counting the number of missing values for each variable in the data frame. 
+```{r}
+assess_data_quality <- function(df) {
+  quality_df <- data.frame(
+    absolute_missing_values = colSums(is.na.data.frame(df)),
+    relative_missing_values = colSums(is.na.data.frame(df)) / nrow(df)
+  )
+  return(quality_df[order(quality_df$relative_missing_values, 
+                          decreasing = TRUE), ])
+}
+
+assess_data_quality(df_sales)
+```
+
+We can not observe any variables with missing values for the quarterly sales data frame.
+
+
+## 1.7 Tasks for data preparation 
+1. Log transform interim_sales variable
+2. Exclude companies with less than 40 observations
+3. Interpolate companies with non-continuous time series'
+4. Remove duplicates for NEWS CORP and ALPHABET INC
+
+# 2. Balance sheet
+## 2.1 Load data
+```{r}
+df_balance_sheet <- read_csv(BALANCE_SHEET_PATH, show_col_types = FALSE)
+df_balance_sheet <- df_balance_sheet[, -1]
+head(df_balance_sheet)
+```
+
+## 2.2 Show data description
+```{r}
+show_data_description(df_balance_sheet)
+```
+
+We can observe that the balance sheet data frame contains 10563 records with 30 variables. All of the variables except the company are of numeric type.
+
+## 2.3 Distributions
+```{r}
+show_data_distribution(df_balance_sheet)
+```
+
+In the histograms above, we can see that many of the variables are highly right skewed. As for the sales data, we will use a log transformation for those variables in the data preparation step.
+
+## 2.4 Investigate number of observations and continuity per company
+No we will investigate the number of observations and the continuity per company as we also did it for the sales data frame. In contrast to the sales data frame, where we got data in a quarterly frequency, the balance sheet data is on a yearly frequency. Therefore our best case number of observations is 21 and the minimum number is 10.
+
+```{r}
+# calculate observations per company
+obs_per_company <-
+  df_balance_sheet %>% group_by(df_balance_sheet$company) %>% summarise(n_observations = n()) %>% arrange(n_observations)
+obs_per_company
+
+cat("Minimum number of observations", paste(min(obs_per_company$n_observations)), "\n")
+cat("Maximum number of observations", paste(max(obs_per_company$n_observations)), "\n")
+```
+
+The table above is sorted in ascending order, therefore we can already see, that there are no companies with not enough observations. The console output also confirms that there are no companies with too many observations. A quick check of if there are duplicates will show if our time series' is continuous and has no gaps in between.
+
+```{r}
+cat("Found",
+    paste(sum(duplicated(df_balance_sheet))),
+    "duplicated records in the balance sheet data frame.")
+```
+
+## 2.5 Correlation analysis
+Due to the high number of variables in the data frame, visualizing a correlation matrix leads to visual clutter and is therefore difficult. Thus we make use of the lares library which creates a table of the top 25 variable pairs ranked by their correlation value. Additionally, a significance test (at the 5% level) for the correlations is performed. 
+```{r}
+dfbs_num <- df_balance_sheet[, sapply(df_balance_sheet, is.numeric)] # obtain only numeric columns
+
+corr_cross(dfbs_num, # name of dataset
+  max_pvalue = 0.05, # display only significant correlations (at 5% level)
+  rm.na = TRUE, # remove NAs
+  top = 25 # show only top 25 variable pairs
+)
+```
+In the plot above, we can see that all of the top 25 correlations of the balance sheet variables include the year variable. The two pairs with the highest positive correlation value are year with CURRENT, DEPOSIT & OTHER A/CS and year with TOTAL ADVANCES. The remaining correlations can be neglected due to their low value. Let's now investigate if there are also correlations in between the variables by excluding the year variable from the analysis.      
+
+```{r}
+dfbs_num <- dfbs_num[, -1] # remove year variable
+
+corr_cross(dfbs_num, # name of dataset
+  max_pvalue = 0.05, # display only significant correlations (at 5% level)
+  rm.na = TRUE, # remove NAs
+  top = 25 # show only top 25 variable pairs
+)
+```
+We can observe that there are no significant correlations between the variables if we exclude the year column. This is good as we do not have to perform variable selection for this table, as we would have to do if there were high correlations due to possible instabilities when modeling the data.   
+
+## 2.6 Data quality assesment
+```{r}
+assess_data_quality(df_balance_sheet)
+```
+We can observe that all variables, except for company and year contain missing values. For some variables, we will perform data imputation in the data preparation step. To keep the imputation effort manageable and to not introduce artifacts by imputing variables, where too much data is missing. We will remove variables where more than 25% of the records have missing values.
+
+## 2.7 Tasks for data preparation
+1. Log transform right-skewed variables
+2. Remove variables where > 25% of values are missing
+3. Impute missing values for other variables
+
+# 3. Profit and loss
+## 3.1 Load data
+```{r}
+df_profit_loss <- read_csv(PROFIT_LOSS_PATH, show_col_types = FALSE)
+df_profit_loss <- df_profit_loss[, -1]
+head(df_profit_loss)
+```
+
+## 3.2 Show data description
+```{r}
+show_data_description(df_profit_loss)
+```
+In the output above, we can see that the profit loss data frame contains 10563 records with 42 variables for 503 distinct companies. We can also see that similarly to the balance sheet data frame, all variables except for the company are numeric. 
+
+## 3.3 Distributions
+```{r}
+show_data_distribution(df_profit_loss)
+```
+Also for the profit and loss data frame, we can see many right-skewed variables. To make those distributions more symmetrical, we have to perform a log transformation in the data preparation stage.
+
+## 3.4 Investigate number of observations and continuity per company
+As we previously did it for the other two tables, we will now investigate the number of observations for the profit and loss data frame. This data frame is also present in a yearly frequency, which leads to an optimal number of observations of 21 for each company.
+```{r}
+# calculate observations per company
+obs_per_company <-
+  df_profit_loss %>% group_by(df_profit_loss$company) %>% summarise(n_observations = n()) %>% arrange(n_observations)
+obs_per_company
+
+cat("Minimum number of observations", paste(min(obs_per_company$n_observations)), "\n")
+cat("Maximum number of observations", paste(max(obs_per_company$n_observations)), "\n")
+```
+
+Similar to the balance sheet data frame, this data frame contains an optimal number of observations for each company. We will quickly perform a duplicate test to ensure that there are no gaps in the data.
+
+```{r}
+cat("Found",
+    paste(sum(duplicated(df_profit_loss))),
+    "duplicated records in the profit loss data frame.")
+```
+
+## 3.5 Correlation analysis
+Similarly to the balance sheet table, we will now perform a pair-wise correlation analysis for the profit and loss data frame. 
+```{r}
+dfpl_num <- df_profit_loss[, sapply(df_profit_loss, is.numeric)] # obtain only numeric columns
+
+corr_cross(dfpl_num, # name of dataset
+  max_pvalue = 0.05, # display only significant correlations (at 5% level)
+  rm.na = TRUE, # remove NAs
+  top = 25 # show only top 25 variable pairs
+)
+```
+In the plot above, we can now see a very different picture as before. All of the shown variable pairs are highly correlated for the profit and loss data frame. This makes sense, as the values of a profit and loss statement are all highly dependent on each other. EBIT and EBITDA for example only have the difference that the EBIT includes the earnings before interests and taxes, whereas the EBITDA includes the earnings before interests, taxes, depreciation and amortization. The EBIT therefore equals the EBITDA minus the depreciation and amortization value. As such highly correlated variables can lead to instability when modeling the data, we will perform two decorrelation strategies in the data preparation stage: (1) We will employ principal component analysis (PCA) to reduce the dimensionality of the profit and loss variables and thereby remove the correlation and (2) only keep the variables for which we have the most data and drop all other variables that are highly correlated to this variable.       
+
+## 3.6 Data quality assesment
+```{r}
+assess_data_quality(df_profit_loss)
+```
+Similar to the balance sheet data frame, the profit and loss data frame contains missing values for all variables except year and company. We will also exclude variables with more than 25% missing values for this data frame and impute others in the data preparation stage.
+
+## 3.7 Tasks for data preparation
+1. Log transform right-skewed variables
+2. Remove variables where > 25% of values are missing
+3. Impute missing values for other variables
+4. Perform decorrelation via PCA and variable selection
+
+# 4. General remarks
+1. By just comparing the outputs of the code chunks 1.1, 2.1 and 3.1, we can see that there are different company naming schemes (e.g., APPLE and APPLE INC). We will have to take care of that when joining all of the tables together. 
+2. The variable names for the balance sheet and profit loss data frame are capitalized and contain white spaces and special characters, which we should transform in the data preparation stage.
+
+
+
+
+
