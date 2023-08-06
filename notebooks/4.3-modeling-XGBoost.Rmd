@@ -1,0 +1,290 @@
+## 4.3 XGBoost Forecasting
+Within this section, we will train a tree-based multivariate machine learning model called XGBoost (eXtreme Gradient Boosting). This model will use the exogenous variables from the balance sheet and profit and loss statements to forecast the quarterly sales of particular companies. In contrast to the ARIMA section, where we fitted a separate model for each time series, we will only train one XGBoost model that is capable of generating forecasts for all companies.    
+XGBoost is an ensemble model that combines multiple decision trees to create a forecasting model. It works by iteratively building a series of decision trees and then combining their predictions to obtain the final forecast. Each decision tree is trained to minimize the errors of the previous trees, resulting in a more accurate ensemble model. However, it's important to note that the prediction quality of a machine learning model like XGBoost normally increases with the number of data points it can use for training. Since our data set only consists of 15 training data points for each particular company, there is the possibility that XGBoost cannot show its full potential. 
+Because we previously created two separate data sets, one using a variable selection approach and one using principal components as variables, we will train a separate model for each of those.    
+
+### Imports
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.pos= "H")
+```
+
+```{r}
+if (!require(tidyverse)) {
+  install.packages("tidyverse")
+}
+library(tidyverse)
+
+if (!require(xgboost)) {
+  install.packages("xgboost")
+}
+library(xgboost)
+
+if (!require(caret)) {
+  install.packages("caret")
+}
+library(caret
+)
+
+if (!require(doMC)) {
+  install.packages("doMC")
+}
+library(doMC
+)
+```
+
+### Constants
+
+```{r}
+BASE_PATH <- "../data/processed"
+TRAIN_VAR_SEL_PATH <- paste(BASE_PATH, "train_var_sel.csv", sep = "/")
+TEST_VAR_SEL_PATH <- paste(BASE_PATH, "test_var_sel.csv", sep = "/")
+TRAIN_PCA_PATH <- paste(BASE_PATH, "train_pca.csv", sep = "/")
+TEST_PCA_PATH <- paste(BASE_PATH, "test_pca.csv", sep = "/")
+FORECAST_XGBOOST_VAR_SEL_PATH <- paste(BASE_PATH, "forecast_XGBoost_var_sel.csv", sep= "/")
+FORECAST_XGBOOST_PCA_PATH <- paste(BASE_PATH, "forecast_XGBoost_pca.csv", sep= "/")
+```
+
+### 4.3.1 XGBoost Forecasting for data with variable selection
+
+First of all, we will fit a model for the data set that was created with a variable selection approach.
+
+#### 4.3.1.1 Load data
+
+```{r}
+# variable selection
+df_train_var_sel <- read_csv(TRAIN_VAR_SEL_PATH, show_col_types = FALSE)
+df_train_var_sel <- df_train_var_sel[, -1] # remove index col
+head(df_train_var_sel)
+
+df_test_var_sel <- read_csv(TEST_VAR_SEL_PATH, show_col_types = FALSE)
+df_test_var_sel <- df_test_var_sel[, -1]
+head(df_test_var_sel)
+```
+
+#### 4.3.1.2 Tune XGBoost model
+
+Now we will define a function that fits multiple XGBoost models with different parameters. The train function of the library caret allows to specify a parameter tuneLength which denotes the number of levels for each tuning parameter that is generated for parameter tuning. The set of candidate parameters will be obtained by a random search approach. To ensure that our model will not be overfitting to the training data (i.e., will not generalize to unseen data), we will use a group 5-fold cross-validation approach. Here, the training data set is divided into five equally sized folds based on the company names (such that a time series is not in multiple folds at the same time). The model is trained on four folds and validated on the remaining fold in each iteration, creating five separate evaluations. The final performance metric is the average of these five evaluations. 
+Note that even though, we use multiple cores for fitting the models, this step will be computationally expensive.  
+
+```{r}
+# register cores for multicore processing 
+registerDoMC(cores = 2) 
+
+tune_xgboost <- function(df_train, df_test) {
+  
+  # set fixed random seed
+  set.seed(42) 
+
+  # Set the number of folds for cross-validation
+  k_folds <- 5
+  
+  # Create cross-validation indices based on the company name
+  cv_indices <- groupKFold(df_train$company.sales, k = k_folds)
+
+  # Set up train control with k-fold cross-validation
+  ctrl <- trainControl(method = "cv", index = cv_indices)
+  
+  # fit xgboost model
+  model <- train(
+    log.interim_sales ~ .,
+    # Specify your target variable and predictors
+    data = df_train %>% select(year:log.interim_sales),
+    method = "xgbTree",
+    # allows automatic tuning and specifies 
+    # number of different values to try for each parameter
+    tuneLength = 5, # use 5 levels for each tuning parameter
+    metric = "RMSE",
+    # Root mean squared error as evaluation metric
+    verbosity = 0, # suppress internal deprecation warning
+    trControl = ctrl
+  )
+  
+  # filter for best parameter set that was found during optimization
+  best_params <- model$results %>% filter(RMSE == min(RMSE))
+  
+  # forecast on test set
+  df_forecast <- data.frame(df_test) # copy
+  df_forecast$log.interim_sales <-
+    predict(model$finalModel, newdata = as.matrix(df_test %>% select(year:quarter)))
+  
+  return(list(
+    model = model,
+    best_params = best_params,
+    df_forecast = df_forecast
+  ))
+}
+
+res.var_sel <- tune_xgboost(df_train = df_train_var_sel, df_test = df_test_var_sel)
+res.var_sel$best_params
+```
+
+In the table above, we can see the best parameters that were found during our XGBoost tuning. Eta controls how much information from a new tree will be used in the Boosting. If it is close to zero we will use only a small piece of information from each new tree. If we set eta to 1 we will use all information from the new tree. Max_depth controls the maximum depth of the trees. Deeper trees have more terminal nodes and fit more data, but are also more prone to overfitting. Gamma specifies the minimum loss reduction to make a split within a tree and is kept at zero. Colsample_bytree denotes the proportion of variables that will be used to fit a new tree. Min_child_weight defines the minimum sum of weights of all observations required in a child and is used to control overfitting. Higher values prevent a model from learning relations which might be highly specific to the particular sample selected for a tree. Subsample denotes the proportion of observations that are selected to build a new tree and can also be used to control overfitting. Nrounds defines the number of trees that are included in the final model. RMSE, Rsquared and MAE are the evaluation metrics that are computed for this particular set of parameters. RMSESD, RsquaredSD, and RsquaredSD represent the standard deviations of those metrics. 
+Note that we also tested a version that did not use a 5-fold cross-validation approach. This version did result in lower errors for the training data but higher ones for the test data, which is a clear sign of overfitting.  
+
+#### 4.3.1.3 Visualize XGBoost forecasts for some example companies
+
+As for the ARIMA models, we will now visualize the forecasts by XGBoost on the variable selection data set for Apple, Alphabet and Amazon. 
+
+```{r, fig.align = 'center', out.extra = ''}
+plot_xgb_forecast <-
+  function(df_train,
+           df_test,
+           df_forecast,
+           company) {
+    df_train_sel <-
+      df_train[df_train$company.sales == company, ]
+    df_test_sel <-
+      df_test[df_test$company.sales == company, ]
+    df_forecast_sel <-
+      df_forecast[df_forecast$company.sales == company, ]
+    
+    # plot train and test part of time series
+    plot(
+      df_train_sel$year + (as.integer(df_train_sel$quarter) / 4),
+      df_train_sel$log.interim_sales,
+      type = "l",
+      lwd=2,
+      xlim = c(min(df_train_sel$year), max(df_test_sel$year) + 1),
+      ylim = c(
+        min(
+          df_train_sel$log.interim_sales,
+          df_test_sel$log.interim_sales,
+          df_forecast_sel$log.interim_sales
+        ),
+        max(
+          df_train_sel$log.interim_sales,
+          df_test_sel$log.interim_sales,
+          df_forecast_sel$log.interim_sales
+        )
+      ),
+      main = paste0("XGBoost for ", company),
+      xlab = "Time",
+      ylab = "log(interim_sales)"
+    )
+    lines(df_test_sel$year + (as.integer(df_test_sel$quarter) / 4),
+          df_test_sel$log.interim_sales,
+          lty = 2)
+    
+    lines(
+      df_forecast_sel$year + (as.integer(df_forecast_sel$quarter) / 4),
+      df_forecast_sel$log.interim_sales,
+      lty = 2,
+      col = 5,
+      lwd=2
+    )
+    
+    legend(
+      "bottomright",
+      legend = c("Train", "Test", "Forecast"),
+      col = c(1, 1, 5),
+      lty = c(1, 2, 2),
+      lwd=2
+    )
+    
+  }
+
+plot_xgb_forecast(
+  df_train_var_sel,
+  df_test_var_sel,
+  res.var_sel$df_forecast,
+  "APPLE INC"
+)
+plot_xgb_forecast(
+  df_train_var_sel,
+  df_test_var_sel,
+  res.var_sel$df_forecast,
+  "ALPHABET INC"
+)
+plot_xgb_forecast(
+  df_train_var_sel,
+  df_test_var_sel,
+  res.var_sel$df_forecast,
+  "AMAZON.COM INC"
+)
+```
+
+In the plots above, we can see that the forecasts of the XGBoost model with the variable selection data set look less promising as the ARIMA forecasts. For Apple, XGBoost does a good job in forecasting the mean of the first few years. After that the forecast suddenly drops and stays constant. For Alphabet and Amazon, both the trend and the seasonality are not estimated correctly. A reason for that can be the few training observations for each particular company. 
+
+#### 4.3.1.4 Write XGBoost forecasts with variable selection to file
+
+Finally, we will write the forecasts to a csv file.
+
+```{r}
+write.csv(
+  res.var_sel$df_forecast,
+  FORECAST_XGBOOST_VAR_SEL_PATH,
+  row.names = FALSE
+)
+```
+
+### 4.3.2 XGBoost Forecasting for data with PCA
+
+Now we will perform the similar steps for the data set with principal component analysis as we did it for the data set with variable selection.
+
+#### 4.3.2.1 Load data
+
+```{r}
+# PCA
+df_train_pca <- read_csv(TRAIN_PCA_PATH, show_col_types = FALSE)
+df_train_pca <- df_train_pca[, -1]
+head(df_train_pca)
+
+df_test_pca <- read_csv(TEST_PCA_PATH, show_col_types = FALSE)
+df_test_pca <- df_test_pca[, -1]
+head(df_test_pca)
+```
+\newpage
+
+#### 4.3.2.2 Tune XGBoost model
+
+```{r}
+res.pca <- tune_xgboost(df_train = df_train_pca, df_test = df_test_pca)
+res.pca$best_params
+```
+
+By looking at table above showing the found parameters of the tuning run with the principal component data,  we can observe some different results. The parameter tuning found an eta value of 0.4 (vs. 0.3 for variable selection), a max_depth of 2 (vs. 4 for variable selection), a gamma value of 0 (similar to the variable selection data set), a colsample_bytree value of 0.8 and a min_child_weight value of 1, which are also similar to the variable selection data.  The values for subsample (0.625 vs. 0.5) and nrounds (250 vs. 50) are again different. The found parameters represent an ensemble model that consists of more but less deep trees for the PCA data set as for the variable selection data set. By looking at the RMSE, we can see, that the error of the model that uses principal components is slightly higher as for the variable selection model. A more in-depth evaluation of both models will be performed in the evaluation notebook.     
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+#### 4.3.2.3 Visualize XGBoost forecasts for some example companies
+```{r, fig.align = 'center', out.extra = ''}
+
+plot_xgb_forecast(
+  df_train_pca,
+  df_test_pca,
+  res.pca$df_forecast,
+  "APPLE INC"
+)
+
+plot_xgb_forecast(
+  df_train_pca,
+  df_test_pca,
+  res.pca$df_forecast,
+  "ALPHABET INC"
+)
+
+plot_xgb_forecast(
+  df_train_pca,
+  df_test_pca,
+  res.pca$df_forecast,
+  "AMAZON.COM INC"
+)
+```
+
+
+In the visualized forecasts above, we can see that the PCA model shows a different behavior than the model with variable selection data. At least for Alphabet and Amazon, we can see that the forecasts are closer to the test data for the first years, but suddenly show a strange behavior afterwards. At least visually, the PCA model seems to make better forecasts for Apple and Alphabet than the model using variable selection data. But the forecasts of both models are not satisfactory and look unnatural compared to the ARIMA forecasts.
+
+#### 4.3.2.4 Write XGBoost forecasts with PCA to file
+
+Finally, we will write the forecasts to a csv file.
+
+```{r}
+write.csv(
+  res.pca$df_forecast,
+  FORECAST_XGBOOST_PCA_PATH,
+  row.names = FALSE
+)
+```
+

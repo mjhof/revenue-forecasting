@@ -1,0 +1,91 @@
+## 4.1 Naive Forecasting
+
+We will now perform a naive forecast that acts as a baseline for our subsequent models. For the naive forecast, we will simply use the latest value of the interim sales variable as forecast for all time points in the forecasting horizon (5 years) for a particular company. 
+
+### Imports
+```{r}
+if(!require(tidyverse)) {
+  install.packages("tidyverse")
+}
+library(tidyverse)
+```
+
+### Constants
+```{r}
+BASE_PATH <- "../data/processed"
+TRAIN_VAR_SEL_PATH <- paste(BASE_PATH, "train_var_sel.csv", sep = "/")
+TEST_VAR_SEL_PATH <- paste(BASE_PATH, "test_var_sel.csv", sep = "/")
+FORECAST_NAIVE_PATH <- paste(BASE_PATH, "forecast_naive.csv", sep= "/")
+```
+
+### 4.1.1 Load data
+As we will only need the sales variable for our forecast, it does not matter if we load the data set with variable selection or with PCA.
+```{r}
+df_train <- read_csv(TRAIN_VAR_SEL_PATH, show_col_types = FALSE)
+
+# select relevant variables
+df_train <-
+  df_train %>% select(
+    c(
+      company.sales,
+      company.rest,
+      year,
+      quarter,
+      log.interim_sales
+    )
+  )
+head(df_train)
+
+df_test <- read_csv(TEST_VAR_SEL_PATH, show_col_types = FALSE)
+
+# select relevant variables
+df_test <-
+  df_test %>% select(
+    c(
+      company.sales,
+      company.rest,
+      year,
+      quarter,
+      log.interim_sales
+    )
+  )
+head(df_test)
+```
+
+### 4.1.2 Perform Naive Forecast
+We will now select the most recent observation for each company in the training data set and then assign this value as a prediction for the full prediction horizon of each company.
+
+```{r}
+# select most recent sales value per company
+most_recent_observations <- df_train %>% group_by(company.sales) %>%
+  filter(year == max(year) & quarter == max(quarter)) %>%
+  select(company.sales, log.interim_sales) %>%
+  ungroup()
+
+# create copy of test data frame
+df_forecast <- data.frame(df_test)
+
+# assign most recent sales value to prediction data frame
+for (company in unique(df_forecast$company.sales)) {
+  forecast_value <-
+    as.double(
+      most_recent_observations[most_recent_observations$company.sales == company, 
+                               "log.interim_sales"])
+  df_forecast[df_forecast$company.sales == company, "log.interim_sales"] <-
+    forecast_value
+}
+head(df_forecast)
+```
+
+### 4.1.3 Write naive forecasts to file
+Finally, we write the naive forecasts to a csv file.
+```{r}
+write.csv(
+  df_forecast,
+  FORECAST_NAIVE_PATH,
+  row.names = FALSE
+)
+```
+
+
+

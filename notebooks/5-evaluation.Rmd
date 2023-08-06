@@ -1,0 +1,383 @@
+# 5. Evaluation
+The Evaluation stage is the final CRISP-DM stage we will perform within this project. As the name suggests, the goal of this stage is to evaluate the models we produced in the previous stage.
+Within this section, we will first of all load the test data and the forecasts of all model variants to compute the evaluation metrics root mean squared error (RMSE), mean absolute error (MAE) and mean absolute scaled error (MASE). Followed by that we will use those metrics to perform significance testing with a Wilcoxon signed rank test. The final step will be to utilize the industry sector data obtained with OpenRefine in the Data Preparation stage and to analyze if the model performances vary between industry sectors. 
+
+## Imports
+
+```{r}
+if (!require(Metrics)) {
+  install.packages("Metrics")
+}
+library(Metrics)
+
+if (!require(MASS)) {
+  install.packages("MASS")
+}
+library(MASS)
+
+if (!require(ggplot2)) {
+  install.packages("ggplot2")
+}
+library(ggplot2)
+
+if (!require(tidyverse)) {
+  install.packages("tidyverse")
+}
+library(tidyverse)
+```
+
+## Constants
+
+```{r}
+BASE_PATH <- "../data/processed"
+TRAIN_VAR_SEL_PATH <- paste(BASE_PATH, "train_var_sel.csv", sep = "/")
+TEST_VAR_SEL_PATH <- paste(BASE_PATH, "test_var_sel.csv", sep = "/")
+FORECAST_NAIVE_PATH <- paste(BASE_PATH, "forecast_naive.csv", sep= "/")
+FORECAST_ARIMA_PATH <- paste(BASE_PATH, "forecast_ARIMA.csv", sep= "/")
+FORECAST_XGBOOST_VAR_SEL_PATH <- paste(BASE_PATH, "forecast_XGBoost_var_sel.csv", sep= "/")
+FORECAST_XGBOOST_PCA_PATH <- paste(BASE_PATH, "forecast_XGBoost_pca.csv", sep= "/")
+INDUSTRY_SECTOR_PATH <- paste(BASE_PATH, "industry_sector.csv", sep= "/")
+```
+
+## 5.1. Preparations
+First of all, we will load the test data and define the functions to compute the evaluation metrics.
+### 5.1.1 Load test data
+
+```{r}
+df_test <- read_csv(TEST_VAR_SEL_PATH, show_col_types = FALSE)
+head(df_test)
+```
+
+### 5.1.2 Create evaluation data frame
+
+```{r}
+df_eval <- data.frame()
+```
+
+### 5.1.3 Define function to calculate metrics and evaluate models
+
+The functions below calculate the RMSE, the MAE and the MASE. All of those metrics will be calculated for the log transformed sales variable and the sales variable on the original scale. To back-transform the forecasts to the original scale, we only need an exponential function and the constant we added during the data preparation to make the sales variable non-negative. Although the RMSE and MAE are the more well-known evaluation metrics, we will use the MASE as our main measure. The MASE is a metric used to evaluate the accuracy of a forecast model by measuring the relative performance of a forecasting method by comparing the mean absolute forecast errors to the mean absolute errors of a naive forecast. The MASE is scale-independent, and therefore suitable to compare the forecast performance across our different company time series' with varying scales.    
+
+```{r}
+calculate_metrics <- function(actual, forecast) {
+  root_mean_squared_error <- rmse(actual, forecast)
+  mean_absolute_error <- mae(actual, forecast)
+  mean_absolute_scaled_error <-
+    mase(actual, forecast, step_size = 4) # step_size = 4 due to quarterly data
+  return(
+    list(
+      root_mean_squared_error = root_mean_squared_error,
+      mean_absolute_error = mean_absolute_error,
+      mean_absolute_scaled_error = mean_absolute_scaled_error
+    )
+  )
+}
+
+evaluate_model <-
+  function(df_forecast, model, log_constant = 393001) {
+    df_eval <- data.frame()
+    # LOG SCALE
+    # evaluate each company separately
+    for (company in unique(df_forecast$company.sales)) {
+      actual <-
+        df_test[df_test$company.sales == company, ]$log.interim_sales
+      forecast <-
+        df_forecast[df_forecast$company.sales == company, ]$log.interim_sales
+      metrics <- calculate_metrics(actual, forecast)
+      df_eval <- rbind(
+        df_eval,
+        data.frame(
+          company = company,
+          model = model,
+          scale = "log",
+          rmse = metrics$root_mean_squared_error,
+          mae = metrics$mean_absolute_error,
+          mase = metrics$mean_absolute_scaled_error
+        )
+      )
+    }
+    
+    # evaluate all companies
+    actual <-
+      df_test$log.interim_sales
+    forecast <-
+      df_forecast$log.interim_sales
+    metrics <- calculate_metrics(actual, forecast)
+    df_eval <- rbind(
+      df_eval,
+      data.frame(
+        company = "ALL COMPANIES (AVERAGE)",
+        model = model,
+        scale = "log",
+        rmse = metrics$root_mean_squared_error,
+        mae = metrics$mean_absolute_error,
+        mase = metrics$mean_absolute_scaled_error
+      )
+    )
+    
+    # ORIGINAL SCALE
+    # evaluate each company separately
+    for (company in unique(df_forecast$company.sales)) {
+      actual <-
+        exp(
+          df_test[df_test$company.sales == company, ]$log.interim_sales) - log_constant
+      forecast <-
+        exp(
+          df_forecast[df_forecast$company.sales == company, ]$log.interim_sales) - log_constant
+      metrics <- calculate_metrics(actual, forecast)
+      df_eval <- rbind(
+        df_eval,
+        data.frame(
+          company = company,
+          model = model,
+          scale = "original",
+          rmse = metrics$root_mean_squared_error,
+          mae = metrics$mean_absolute_error,
+          mase = metrics$mean_absolute_scaled_error
+        )
+      )
+    }
+    
+    # evaluate all companies
+    actual <-
+      exp(df_test$log.interim_sales) - log_constant
+    forecast <-
+      exp(df_forecast$log.interim_sales) - log_constant
+    metrics <- calculate_metrics(actual, forecast)
+    df_eval <- rbind(
+      df_eval,
+      data.frame(
+        company = "ALL COMPANIES (AVERAGE)",
+        model = model,
+        scale = "original",
+        rmse = metrics$root_mean_squared_error,
+        mae = metrics$mean_absolute_error,
+        mase = metrics$mean_absolute_scaled_error
+      )
+    )
+    return(df_eval)
+  }
+```
+
+## 5.2. Naive Forecasting
+### 5.2.1 Load data
+
+```{r}
+df_forecast_naive <- read_csv(FORECAST_NAIVE_PATH, show_col_types = FALSE)
+head(df_forecast_naive)
+```
+
+### 5.2.2 Calculate metrics
+
+```{r}
+df_eval <- rbind(df_eval, evaluate_model(df_forecast_naive, "naive forecast"))
+head(df_eval[df_eval$model == "naive forecast",])
+```
+
+## 5.3. ARIMA Forecasting
+### 5.3.1 Load data
+
+```{r}
+df_forecast_arima <- read_csv(FORECAST_ARIMA_PATH, show_col_types = FALSE)
+head(df_forecast_arima)
+```
+
+### 5.3.2 Calculate metrics
+
+```{r}
+df_eval <- rbind(df_eval, evaluate_model(df_forecast_arima, "ARIMA"))
+head(df_eval[df_eval$model == "ARIMA",])
+```
+
+## 5.4. XGBoost Forecasting with variable selection
+### 5.4.1 Load data
+
+```{r}
+df_forecast_xgb_var_sel <-
+  read_csv(FORECAST_XGBOOST_VAR_SEL_PATH, show_col_types = FALSE)
+head(df_forecast_xgb_var_sel)
+```
+
+### 5.4.2 Calculate metrics
+
+```{r}
+df_eval <-
+  rbind(df_eval,
+        evaluate_model(df_forecast_xgb_var_sel, "XGBoost variable selection"))
+head(df_eval[df_eval$model == "XGBoost variable selection", ])
+```
+
+## 5.5. XGBoost Forecasting with PCA
+### 5.5.1 Load data
+
+```{r}
+df_forecast_xgb_pca <-
+  read_csv(FORECAST_XGBOOST_PCA_PATH, show_col_types = FALSE)
+head(df_forecast_xgb_pca)
+```
+
+### 5.5.2 Calculate metrics
+
+```{r}
+df_eval <-
+  rbind(df_eval, evaluate_model(df_forecast_xgb_pca, "XGBoost PCA"))
+head(df_eval[df_eval$model == "XGBoost PCA", ])
+```
+
+```{r}
+df_eval[df_eval$company == "ALL COMPANIES (AVERAGE)" & df_eval$scale == "log",]
+df_eval[df_eval$company == "ALL COMPANIES (AVERAGE)" & df_eval$scale == "original",]
+
+```
+
+## 5.6. Significance tests
+Now we will perform significance tests by using a Wilcoxon signed rank test with two samples. The Wilcoxon signed-rank test is especially useful when we want to compare two related groups, where the data does not meet the assumptions of parametric tests like the paired t-test (e.g., non-normal data or small sample sizes). We will use the MASE metric within our significance tests.  
+
+### 5.6.1 Naive forecast vs. ARIMA
+The null hypothesis for this test is that the errors of the naive forecast and the ARIMA model are equally high or higher for the ARIMA model. The alternative hypothesis is that the errors of the naive forecast are higher than the errors of the ARIMA model.  
+
+```{r}
+
+naive_mase <- df_eval[df_eval$model == "naive forecast" &
+          df_eval$scale == "log" &
+          df_eval$company != "ALL COMPANIES (AVERAGE)", "mase"]
+arima_mase <- df_eval[df_eval$model == "ARIMA" &
+          df_eval$scale == "log" &
+          df_eval$company != "ALL COMPANIES (AVERAGE)", "mase"] 
+
+wilcox.test(naive_mase,
+          arima_mase, 
+          alternative = "greater"#,
+          #paired = TRUE
+          )
+```
+
+By looking at the p-value of 9.748e-06 displayed above, we can definitely reject the null hypothesis at the 5% significance level. This means that the errors of the naive forecast are significantly higher than the errors produced from ARIMA. 
+
+### 5.6.2 Naive Forecast vs. XGBoost with variable selection 
+The null hypothesis for this test is that the errors of the naive forecast and the XGBoost model with variable selection are equally high or higher for the XGBoost model with variable selection. The alternative hypothesis is that the errors of the naive forecast is higher than the errors of the XGBoost model with variable selection.  
+
+```{r}
+xgb_var_sel_mase <-
+  df_eval[df_eval$model == "XGBoost variable selection" &
+            df_eval$scale == "log" &
+            df_eval$company != "ALL COMPANIES (AVERAGE)", "mase"]
+
+wilcox.test(naive_mase,
+            xgb_var_sel_mase,
+            alternative = "greater",
+            paired = TRUE)
+```
+
+The p-value of 0.9999 displayed above clearly shows that we cannot reject the null hypothesis. This means that the errors of the XGBoost model with variable selection data are not lower than the errors of the naive forecasts and that the forecasting of XGBoost with variable selection does not outperform the naive forecasting.      
+
+### 5.6.3 Naive Forecast vs. XGBoost with PCA
+
+Similar as for the test above, the null hypothesis is that that the errors of the naive forecast and the XGBoost model with PCA data are equally high or higher for the XGBoost model with PCA. The alternative hypothesis is that the errors of the naive forecast is higher than the errors of the XGBoost model with PCA.   
+
+```{r}
+xgb_pca_mase <- df_eval[df_eval$model == "XGBoost PCA" &
+          df_eval$scale == "log" &
+          df_eval$company != "ALL COMPANIES (AVERAGE)", "mase"] 
+
+wilcox.test(naive_mase,
+          xgb_pca_mase, 
+          alternative = "greater",
+          paired = TRUE
+          )
+```
+
+Similarly to the significance test of the naive forecasts vs. the XGBoost forecasts with variable selection data, we observe a high p-value of 1, which means that we cannot reject the null hypothesis and the XGBoost model with PCA data does not outperform the naive forecasting.
+
+
+### 5.6.4 ARIMA vs. XGBoost with variable selection
+
+Now we will test if XGBoost with variable selection outperforms the ARIMA forecasts (even though the previous tests already showed that XGBoost is not able to outperform the naive forecasting). The null hypothesis is that the errors of ARIMA are equal or lower than the errors of XGBoost with variable selection. The alternative hypothesis is that the errors of ARIMA are greater than the errors of XGBoost with variable selection.
+
+```{r}
+wilcox.test(arima_mase,
+            xgb_var_sel_mase,
+            alternative = "greater",
+            paired = TRUE)
+```
+
+As expected, the p-value of 1 clearly shows that XGBoost with variable selection is not able to outperform ARIMA in terms of the MASEs. 
+
+### 5.6.5 ARIMA vs. XGBoost with PCA
+
+With this test, we will examine if the XGBoost model using PCA data is able to outperform the ARIMA forecasts. The null hypothesis is that that the errors of ARIMA are equal or lower than the errors of XGBoost with PCA data. The alternative hypothesis is that the errors of ARIMA are greater than the errors of XGBoost with PCA.
+
+```{r}
+wilcox.test(arima_mase,
+            xgb_pca_mase,
+            alternative = "greater",
+            paired = TRUE)
+```
+
+As expected, we can also observe a p-value of 1 for this significance test. Which means that we can definitely not reject the null hypothesis and XGBoost with PCA data does not outperform the ARIMA forecasts. 
+
+
+## 5.7. Industry sector analysis
+Finally, we will make use of the industry sector data we obtained from WikiData by using OpenRefine. In this section, we will join this data with the evaluation data and examine if the performance of models differs between industry sectors.
+
+### 5.7.1 Load industry sector data
+First of all, we will load the data.
+
+```{r}
+df_industry_sector <- read_csv(INDUSTRY_SECTOR_PATH, show_col_types = FALSE)
+head(df_industry_sector)
+colSums(is.na.data.frame(df_industry_sector)) # check missing values
+```
+
+In the output above, we can see that the column industry1 has the least missing values of the three collected columns. Therefore we will only use this column for our analysis.
+
+### 5.7.2 Join industry data with evaluation data frame
+Now we will join it with the test data first, because we need the column company.rest to join the evaluation data frame and the industry data frame, since the linkage in OpenRefine modified the company.sales column. Followed by that, we will join this intermediate data frame with the evaluation data frame.  
+
+```{r}
+df_eval_industry <-
+  merge(
+    merge(df_test, df_industry_sector, by = "company.rest") %>%  # join test and industry sector data
+      mutate(company = company.sales.x) %>% # rename to company
+      dplyr::select(company, industry1) %>% # select only relevant columns
+      distinct(), # drop duplicates
+    df_eval, # join with evaluation data frame
+    by = "company"
+  ) 
+
+head(df_eval_industry)
+```
+
+### 5.7.3 Select industries with >= 5 companies
+In this step, we will group the data by industry and model and mean aggregate the MASEs. Furthermore, we count the companies that fall in each particular industry sector and model and only keep industries where at least five companies are present. Additionally, we will create a new column that stores the industry sector together with the number of companies that are present for each sector which we will use for plotting.
+
+```{r}
+df_eval_industry_viz <-
+  df_eval_industry %>% 
+  filter(scale == "log") %>% # use log scale 
+  group_by(industry1, model) %>% # group by industry and model
+  summarise(mean_mase = mean(mase), n = n()) %>% # aggregate
+  drop_na() %>%  # drop NAs
+  filter(n >= 5) %>% # filter companies that are present > 5 times
+  ungroup() %>% 
+  arrange(industry1) %>% # sort by industry
+  mutate(industry_n = paste0(industry1, " (", n, ")")) # construct column with occurrence
+
+head(df_eval_industry_viz)
+```
+
+### 5.7.4 Plot mean MASE per industry sector and model
+Finally, we plot the industry sectors vs. the mean aggregated MASE for each model variant.
+
+```{r}
+ggplot(data=df_eval_industry_viz, aes(x=mean_mase, y=industry_n, fill=model)) +
+  geom_col(position=position_dodge(width = 0.8)) +
+labs(x = "Mean MASE", y = "Industry (company count)") +
+  ggtitle("Mean Mean Absolute Scaled Error \nper Industry Sector and Model") +
+  theme_minimal()
+```
+
+In the plot above, we can see that the performance of the models differs between the industry sectors. For the telecommunications industry and the pharmaceutical industry, for example, all models have higher errors than the naive forecast. For the petroleum industry and financial services, on the other hand, we can observe that all models - even the XGBoost variants - outperform the naive forecast. It is also interesting to see, that for some industry sectors, the XGBoost with PCA data produces lower errors than XGBoost using the variable selection data. 
+All of those findings indicate, that it can be beneficial to add the industry sector information to the training data set or to train separate models for each industry sector.
+
+

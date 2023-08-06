@@ -1,26 +1,32 @@
----
-title: "Applying the CRISP-DM Data Science Methodology to Sales Volume Forecasting and Budgeting Problems"
-subtitle: "Introduction"
-author: "Matthias Hofmaier (11944050)"
-#- name: Author One   
-output: pdf_document
-date: "May 2023"
----
+# 1. Introduction
 
 Reliable forecasts of a company’s sales volume can be of massive advantage in budgeting and strategic planning. Traditional methods to forecast sales often rely on univariate moving average models. In the last decade, machine learning methods, which can incorporate information over various dimensions gained a lot of popularity. Those models allow the inclusion of variables from annual financial statements, including balance sheets and profit and loss statements, that potentially increase the prediction performance. But dealing with this data can be challenging. Especially for people who are from different domains and are not used to data science workflows. The Cross Industry Standard Process for Data Mining (CRISP-DM) can help to perform data science projects of this kind in a well-defined way. Therefore the goal of this project is to create a guideline project for students in economics that showcases how the CRISP-DM methodology can be applied to sales volume forecasting and budgeting problems. The project will be carried out on the example of comparing a univariate model and a multivariate machine learning model within the context of U.S. stock corporations in the S&P 500 from 2002 to 2022.
 
 ![CRISP-DM Model](../images/crisp-dm.jpg){width="70%"}
 
-The CRISP-DM model consists of six stages that can be followed to successfully solve a data science problem. In the first stage, Business Understanding, the needs of a business are identified and project goals and KPIs are defined. As this project is done within a university course, the goals and KPIs were already defined within a proposal and therefore this stage will be skipped. The dataset that will be used within this project stems from the Thomson Reuters Datastream database and includes the quarterly sales and variables from annual financial statements for S&P 500 stock corporations from 2002 to 2022. The financial statements consist of balance sheets with attributes describing the assets, liabilities, and equity as well as profit and loss statements which contain attributes describing the sales and expenses of a particular company. Datastream comes with an Excel interface but is not made to retrieve data in a clean way for multiple companies at once. Thus, an initial data transformation has to be performed to convert the data spreading over several Excel sheets to a few tables before being able to execute the Data Understanding stage of this project. This will be done within this notebook.
+The CRISP-DM model consists of six stages that can be followed to successfully solve a data science problem. In the first stage, Business Understanding, the needs of a business are identified and project goals and KPIs are defined. As this project is done within a university course, the goals and KPIs were already defined within a proposal and therefore this stage will be skipped. The dataset that will be used within this project stems from the Thomson Reuters Datastream database and includes the quarterly sales and variables from annual financial statements for S&P 500 stock corporations from 2002 to 2022. The financial statements consist of balance sheets with attributes describing the assets, liabilities, and equity as well as profit and loss statements which contain attributes describing the sales and expenses of a particular company. Datastream comes with an Excel interface but is not made to retrieve data in a clean way for multiple companies at once. Thus, an initial data transformation has to be performed to convert the data spreading over several Excel sheets to a few tables before being able to execute the Data Understanding stage of this project. This will be done within this section.
 
 ## Imports
+
 ```{r}
+if(!require(readxl)) {
+  install.packages("readxl")
+}
 library(readxl)
+
+if (!require(tidyverse)) {
+  install.packages("tidyverse")
+}
 library(tidyverse)
+
+if (!require(stringr)) {
+  install.packages("stringr")
+}
 library(stringr)
 ```
 
 ## Constants
+
 ```{r}
 RAW_DATA_PATH <- "../data/raw/datenabzug_sp500.xlsx"
 OUTPUT_BASE_PATH <- "../data/processed"
@@ -29,9 +35,10 @@ BALANCE_SHEET_OUTPUT_PATH <- paste(OUTPUT_BASE_PATH, "balance_sheet.csv", sep = 
 PROFIT_LOSS_OUTPUT_PATH <- paste(OUTPUT_BASE_PATH, "profit_loss.csv", sep = "/")
 ```
 
-# 1. Sales
-## 1.1 Load and transform quartely sales data
-```{r, echo=FALSE}
+## 1.1 Sales
+### 1.1.1 Load and transform quartely sales data
+
+```{r}
 load_transform_sales_quarter <- function(quarter) {
   # read and transpose
   df <-
@@ -96,15 +103,15 @@ cat(
 head(df_sales)
 ```
 
+### 1.1.2 Save to CSV
 
-## 1.2 Save to CSV
 ```{r}
 write.csv(df_sales, SALES_OUTPUT_PATH)
 ```
 
+## 1.2 Balance sheet
+### 1.2.1 Function to add spaces to some company names
 
-# 2. Balance sheet
-## 2.1 Function to add spaces to some company names
 ```{r}
 # add space to names of companies without space before the "-"
 # without this, we will later have difficulties in correctly parsing the variable names
@@ -139,8 +146,9 @@ add_space_to_company_names <-
   }
 ```
 
-## 2.2 Load and transform balance sheet data
-```{r, echo=FALSE}
+### 1.2.2 Load and transform balance sheet data
+
+```{r}
 load_transform_balance_sheet <- function() {
   # read and transpose
   df <- suppressMessages(read_excel(RAW_DATA_PATH, sheet = "Balance Sheet"))
@@ -213,14 +221,16 @@ cat(
 head(df_balance_sheet)
 ```
 
-## 2.3 Save to CSV
+### 1.2.3 Save to CSV
+
 ```{r}
 write.csv(df_balance_sheet, BALANCE_SHEET_OUTPUT_PATH)
 ```
 
-# 3. Profit & Loss
-## 3.1 Load and transform profit & loss data
-```{r, echo=FALSE}
+## 1.3. Profit and loss
+### 1.3.1 Load and transform profit and loss data
+
+```{r}
 load_transform_profit_loss <- function() {
   for (i in 1:2) {
     df_tmp <-
@@ -300,7 +310,9 @@ cat(
 
 head(df_profit_loss)
 ```
-## 3.2 Save to CSV
+
+### 1.3.2 Save to CSV
+
 ```{r}
 write.csv(df_profit_loss, PROFIT_LOSS_OUTPUT_PATH)
 ```

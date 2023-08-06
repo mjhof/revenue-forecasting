@@ -1,0 +1,163 @@
+## 4.2 ARIMA Forecasting
+
+Within this notebook, we will first of all now fit will automatically fit an ARIMA model for three example companies and visualize the forecasts. After that, we will fit ARIMA models for each particular company and write the forecasting results to as csv file.
+
+ARIMA (Autoregressive Integrated Moving Average) is a one-dimensional mathematical model for forecasting future values in time series data. It involves three key components: autoregression (AR), differencing (I), and moving average (MA). The autoregressive component examines the relationship between the current value of a variable and its previous values. It assumes that the current value can be explained by a linear combination of past observations. The order of autoregression (p) determines the number of previous observations that are considered in the model. The differencing component (I) is employed to transform the time series into a stationary series, i.e., a time series that does not have seasonality and trend. Seasonality and trend are eliminated by computing the differences between consecutive observations. The order of differencing (d), specifies the number of differencing operations needed to achieve stationarity. The moving average component (MA) captures the short-term fluctuations or noise in the data. It considers the relationship between the current value and past forecast errors. The order of the moving average (q) specifies the number of previous forecast errors to include in the model. To determine the appropriate values for the ARIMA parameters (p, d, q), the autocorrelation function (ACF) and partial autocorrelation function (PACF) are typically analyzed. As we deal with many time series' at once, we can not analyze the ACFs and PACFs by hand. Fortunately, there is a function in R (auto.arima) that automatically finds the ARIMA parameters for a particular time series.
+
+### Imports
+
+```{r}
+if(!require(tidyverse)) {
+  install.packages("tidyverse")
+}
+library(tidyverse)
+
+if (!require(forecast)) {
+  install.packages("forecast")
+}
+library(forecast)
+```
+
+### Constants
+
+```{r}
+BASE_PATH <- "../data/processed"
+TRAIN_VAR_SEL_PATH <- paste(BASE_PATH, "train_var_sel.csv", sep = "/")
+TEST_VAR_SEL_PATH <- paste(BASE_PATH, "test_var_sel.csv", sep = "/")
+FORECAST_ARIMA_PATH <- paste(BASE_PATH, "forecast_ARIMA.csv", sep= "/")
+```
+
+### 4.2.1 Load data
+
+As we will only need the sales variable for our forecast, it does not matter if we load the data set with variable selection or with PCA.
+
+```{r}
+df_train <- read_csv(TRAIN_VAR_SEL_PATH, show_col_types = FALSE)
+
+# select relevant variables
+df_train <-
+  df_train %>% select(
+    c(
+      company.sales,
+      company.rest,
+      year,
+      quarter,
+      log.interim_sales
+    )
+  )
+head(df_train)
+
+df_test <- read_csv(TEST_VAR_SEL_PATH, show_col_types = FALSE)
+
+# select relevant variables
+df_test <-
+  df_test %>% select(
+    c(
+      company.sales,
+      company.rest,
+      year,
+      quarter,
+      log.interim_sales
+    )
+  )
+head(df_test)
+```
+
+### 4.2.2 Perform ARIMA forecast on some example companies
+
+As we can not inspect the results of auto.arima for all companies by hand, we will now fit ARIMA models on some example companies and inspect the results.
+
+```{r}
+plot_arima_forecast <-
+  function(df_train, df_test, company) {
+    df_train_sel <-
+      df_train[df_train$company.sales == company,]
+    df_test_sel <-
+      df_test[df_test$company.sales == company,]
+    
+    # fit ARIMA model 
+    fit.arima <- auto.arima(df_train_sel$log.interim_sales)
+    forecast.arima <- forecast(fit.arima, h = 20)
+    orders = arimaorder(fit.arima)
+    
+    # plot train and test part of time series
+    plot(
+      df_train_sel$year + (as.integer(df_train_sel$quarter) / 4),
+      df_train_sel$log.interim_sales,
+      type = "l",
+      lwd=2,
+      xlim = c(min(df_train_sel$year), max(df_test_sel$year) + 1),
+      ylim = c(
+        min(
+          df_train_sel$log.interim_sales,
+          df_test_sel$log.interim_sales,
+          forecast.arima$mean
+          ),
+        max(
+          df_train_sel$log.interim_sales,
+          df_test_sel$log.interim_sales,
+          forecast.arima$mean
+        )
+      ),
+      main = paste0("ARIMA(", orders[1], ",", orders[2], ",", orders[3],  ") for ", company),
+      xlab = "Time",
+      ylab = "log(interim_sales)"
+    )
+    lines(df_test_sel$year + (as.integer(df_test_sel$quarter) / 4),
+          df_test_sel$log.interim_sales,
+          lty = 2, lwd=2)
+    
+    lines(
+      df_test_sel$year + (as.integer(df_test_sel$quarter) / 4),
+      forecast.arima$mean,
+      lty = 2,
+      col = 5,
+      lwd=2
+    )
+    
+    legend("bottomright", legend = c("Train", "Test", "Forecast"), col = c(1, 1, 5), lty = c(1, 2, 2), lwd=2)
+  
+  }
+
+plot_arima_forecast(df_train, df_test, "APPLE INC")
+plot_arima_forecast(df_train, df_test, "ALPHABET INC")
+plot_arima_forecast(df_train, df_test, "AMAZON.COM INC")
+```
+
+In the plots above, we can see the ARIMA models that were automatically fitted for Apple, Alphabet and Amazon. We can see that auto.arima found different parameters for each of the companies. For Apple and Amazon, the automatically fitted ARIMA model uses first order differencing (d=1). For Alphabet, the algorithm chose second order differencing (d=2). A reason for this is the different structure of the time series', as it is also visible in the plots. If we look at the values forecasted by ARIMA in cyan, we can see that they look quite reasonable. Especially for Amazon where the forecasted values are almost identical to the values in the test data. For the Apple time series, ARIMA does a good job in capturing the seasonal pattern of the series, but overestimates the slope of the trend. For Alphabet, the model captures almost no seasonal structure and also slightly overestimates the trend of the time series.
+
+### 4.2.3 Perform ARIMA forecast on all companies
+
+After visualizing the ARIMA forecasts for three example companies, we will now perform automatic ARIMA forecasting for all companies.
+
+```{r}
+# create copy of test data frame
+df_forecast <- data.frame(df_test)
+df_forecast[, "log.interim_sales"] <- -1
+
+for (company in unique(df_forecast$company.sales)){
+  # select train part of time series
+  train_ts <- df_train[df_train$company.sales == company, "log.interim_sales"]
+
+  # fit ARIMA model 
+  fit.arima <- auto.arima(train_ts)
+  forecast.arima <- forecast(fit.arima, h = 20) # h = 5 years * 4 quarters  
+  
+  # assign forecast values to data frames
+  df_forecast[df_forecast$company.sales == company, "log.interim_sales"] <- forecast.arima$mean
+}
+
+head(df_forecast)
+```
+
+### 4.2.4 Write ARIMA forecasts to file
+
+Fianlly, we write the forecasted values to csv file.
+
+```{r}
+write.csv(
+  df_forecast,
+  FORECAST_ARIMA_PATH,
+  row.names = FALSE
+)
+```
